@@ -154,7 +154,7 @@ class StateDB:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     """
-                    INSERT INTO vm_config_history
+                    INSERT OR REPLACE INTO vm_config_history
                     (vm_id, cluster_name, config_hash, memory, vcpus, tags_json,
                      node, primary_ip, vm_name, description, disk_summary)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -507,7 +507,7 @@ def compute_config_hash(vm_config: Dict[str, Any], tags: List[str], network_inte
         'ostype': vm_config.get('ostype', ''),
         'cores': vm_config.get('cores', 1),
         'sockets': vm_config.get('sockets', 1),
-        'description': vm_config.get('description', '')[:200],  # 限制长度
+        'description': (vm_config.get('description') or '').replace('\r\n', '\n').replace('\r', '\n').strip()[:200],
         'tags': sorted(tags),  # 排序以确保一致性
         'networks': net_config  # 添加网络接口配置
     }

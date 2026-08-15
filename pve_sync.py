@@ -1147,6 +1147,11 @@ class OptimizedPVEToNetBoxSync:
                 disks[key] = m.group(1) if m else val_str[:80]
         return disks
 
+    @staticmethod
+    def _norm_desc(s) -> str:
+        """Normalize description: unify line endings, strip whitespace."""
+        return (s or '').replace('\r\n', '\n').replace('\r', '\n').strip()
+
     def _write_drift_event(self, vm_name: str, vmid: int, drift_type: str,
                            field_name: str, old_value: str, new_value: str,
                            notified: bool = False):
@@ -1524,8 +1529,8 @@ class OptimizedPVEToNetBoxSync:
                     self._write_drift_event(vm_name, vm_id, 'disk_change', k, old_v, new_v, notified=True)
 
         # VM 描述變更偵測
-        current_desc = (vm_config.get('description') or '').strip()[:500]
-        old_desc = (last_config.get('description') or '').strip()
+        current_desc = self._norm_desc(vm_config.get('description'))[:500]
+        old_desc = self._norm_desc(last_config.get('description'))
         if old_desc and old_desc != current_desc:
             self.stats['config_drifts_detected'] += 1
             print(f"📝 VM {vm_name} 描述變更")
@@ -1830,7 +1835,7 @@ class OptimizedPVEToNetBoxSync:
                                 vm_id=int(vm_id), cluster_name=self.cluster_name, config_hash=config_hash,
                                 memory=memory, vcpus=vcpus_save, tags=tag_names,
                                 node=node_name, primary_ip=cur_ip, vm_name=original_vm_name,
-                                description=(vm_config.get('description') or '').strip()[:500],
+                                description=self._norm_desc(vm_config.get('description'))[:500],
                                 disk_summary=json.dumps(self._parse_disk_summary(vm_config)),
                             )
                         except Exception as _snap_err:
@@ -1887,7 +1892,7 @@ class OptimizedPVEToNetBoxSync:
                 update_data = {
                     'name': vm_name, 'cluster': cluster['id'], 'device': device.id, 'role': role_id,
                     'vcpus': vcpus, 'memory': int(vm_config.get('memory', 0)), 'status': status,
-                    'description': (vm_config.get('description') or '')[:200], 'platform': platform_id,
+                    'description': self._norm_desc(vm_config.get('description'))[:200], 'platform': platform_id,
                     'start_on_boot': boot_choice
                 }
                 if tag_ids:
@@ -1906,7 +1911,7 @@ class OptimizedPVEToNetBoxSync:
                 vm_data_dict = {
                     'serial': vm_id, 'name': vm_name, 'cluster': cluster['id'], 'device': device.id,
                     'role': role_id, 'vcpus': vcpus, 'memory': int(vm_config.get('memory', 0)),
-                    'status': status, 'description': (vm_config.get('description') or '')[:200],
+                    'status': status, 'description': self._norm_desc(vm_config.get('description'))[:200],
                     'platform': platform_id, 'start_on_boot': boot_choice
                 }
                 if tag_ids:
@@ -1943,7 +1948,7 @@ class OptimizedPVEToNetBoxSync:
                     vm_id=int(vm_id), cluster_name=self.cluster_name, config_hash=config_hash,
                     memory=memory, vcpus=vcpus_save, tags=tag_names,
                     node=node_name, primary_ip=primary_ip_str, vm_name=original_vm_name,
-                    description=(vm_config.get('description') or '').strip()[:500],
+                    description=self._norm_desc(vm_config.get('description'))[:500],
                     disk_summary=json.dumps(self._parse_disk_summary(vm_config)),
                 )
             return True
@@ -1969,7 +1974,7 @@ class OptimizedPVEToNetBoxSync:
                             node=node_name,
                             primary_ip=_ip,
                             vm_name=original_vm_name,
-                            description=(vm_config.get('description') or '').strip()[:500],
+                            description=self._norm_desc(vm_config.get('description'))[:500],
                             disk_summary=json.dumps(self._parse_disk_summary(vm_config)),
                         )
                 except Exception:
