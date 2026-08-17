@@ -529,7 +529,7 @@ def compute_config_hash(vm_config: Dict[str, Any], tags: List[str], network_inte
         'ostype': vm_config.get('ostype', ''),
         'cores': vm_config.get('cores', 1),
         'sockets': vm_config.get('sockets', 1),
-        'description': (vm_config.get('description') or '').replace('\r\n', '\n').replace('\r', '\n').strip()[:200],
+        'description': (vm_config.get('description') or '').replace('\r\n', '\n').replace('\r', '\n').strip()[:200].strip(),
         'tags': sorted(tags),  # 排序以确保一致性
         'networks': net_config  # 添加网络接口配置
     }

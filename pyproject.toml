@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "proxsync"
 version = "2.0.9"
+version = "2.0.7"
 description = "NetBox plugin for Proxmox VE inventory synchronization"
 readme = "README.md"
 requires-python = ">=3.10"

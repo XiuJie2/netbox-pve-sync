@@ -1566,8 +1566,8 @@ class OptimizedPVEToNetBoxSync:
                     self._write_drift_event(vm_name, vm_id, 'disk_change', k, old_v, new_v, notified=True)
 
         # VM 描述變更偵測
-        current_desc = self._norm_desc(vm_config.get('description'))[:500]
-        old_desc = self._norm_desc(last_config.get('description'))
+        current_desc = self._norm_desc(vm_config.get('description'))[:500].strip()
+        old_desc = self._norm_desc(last_config.get('description'))[:500].strip()
         if old_desc and old_desc != current_desc:
             self.stats['config_drifts_detected'] += 1
             print(f"📝 VM {vm_name} 描述變更")
@@ -1885,7 +1885,7 @@ class OptimizedPVEToNetBoxSync:
                                 vm_id=int(vm_id), cluster_name=self.cluster_name, config_hash=config_hash,
                                 memory=memory, vcpus=vcpus_save, tags=tag_names,
                                 node=node_name, primary_ip=cur_ip, vm_name=original_vm_name,
-                                description=self._norm_desc(vm_config.get('description'))[:500],
+                                description=self._norm_desc(vm_config.get('description'))[:500].strip(),
                                 disk_summary=json.dumps(self._parse_disk_summary(vm_config)),
                             )
                         except Exception as _snap_err:
@@ -1998,7 +1998,7 @@ class OptimizedPVEToNetBoxSync:
                     vm_id=int(vm_id), cluster_name=self.cluster_name, config_hash=config_hash,
                     memory=memory, vcpus=vcpus_save, tags=tag_names,
                     node=node_name, primary_ip=primary_ip_str, vm_name=original_vm_name,
-                    description=self._norm_desc(vm_config.get('description'))[:500],
+                    description=self._norm_desc(vm_config.get('description'))[:500].strip(),
                     disk_summary=json.dumps(self._parse_disk_summary(vm_config)),
                 )
             return True
@@ -2024,7 +2024,7 @@ class OptimizedPVEToNetBoxSync:
                             node=node_name,
                             primary_ip=_ip,
                             vm_name=original_vm_name,
-                            description=self._norm_desc(vm_config.get('description'))[:500],
+                            description=self._norm_desc(vm_config.get('description'))[:500].strip(),
                             disk_summary=json.dumps(self._parse_disk_summary(vm_config)),
                         )
                 except Exception:
