@@ -256,6 +256,28 @@ class StateDB:
                     })
                 return changes
 
+    def cleanup_old_history(self, cluster_name: str, days: int) -> int:
+        """Delete vm_config_history rows older than `days`, keeping the latest row per VM."""
+        import datetime as _dt
+        cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                result = conn.execute(
+                    """
+                    DELETE FROM vm_config_history
+                    WHERE cluster_name = ?
+                      AND sync_time < ?
+                      AND sync_time NOT IN (
+                          SELECT MAX(sync_time) FROM vm_config_history
+                          WHERE cluster_name = ?
+                          GROUP BY vm_id
+                      )
+                    """,
+                    (cluster_name, cutoff, cluster_name),
+                )
+                conn.commit()
+                return result.rowcount
+
     # ========== 节点状态历史 ==========
 
     def save_node_status(self, node_name: str, cluster_name: str, status: str):

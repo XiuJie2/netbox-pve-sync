@@ -125,12 +125,25 @@ class OptimizedPVEToNetBoxSync:
         self.error_log = []
 
     # ---------- Telegram ----------
-    def send_telegram_notification(self, message: str):
+    # Max Telegram messages per sync run; excess are counted and reported in the summary.
+    _MAX_TELEGRAM_PER_SYNC = 20
+
+    def send_telegram_notification(self, message: str) -> bool:
+        if not getattr(self, 'notify_on_sync', True):
+            return False
+        if not self.telegram_bot_token or not self.telegram_chat_id:
+            return False
+        # Throttle: cap messages per sync run to avoid flooding on bulk changes.
+        sent = getattr(self, '_telegram_sent', 0)
+        if sent >= self._MAX_TELEGRAM_PER_SYNC:
+            self._telegram_suppressed = getattr(self, '_telegram_suppressed', 0) + 1
+            return False
         try:
             url = f"https://api.telegram.org/bot{self.telegram_bot_token}/sendMessage"
             payload = {'chat_id': self.telegram_chat_id, 'text': message, 'parse_mode': 'HTML'}
             response = requests.post(url, data=payload, timeout=10)
             if response.status_code == 200:
+                self._telegram_sent = sent + 1
                 print(f"✓ Telegram 通知已發送")
                 return True
             else:
@@ -241,6 +254,9 @@ class OptimizedPVEToNetBoxSync:
                 message += f"• {error['vm_name']} - {error['ip_address']}\n"
             if len(self.error_log) > 5:
                 message += f"• ... 還有 {len(self.error_log) - 5} 個錯誤\n"
+        suppressed = getattr(self, '_telegram_suppressed', 0)
+        if suppressed:
+            message += f"\n📵 本輪通知已達上限，{suppressed} 則訊息被壓制（詳見 NetBox 漂移事件記錄）"
         self.send_telegram_notification(message)
 
     # ---------- API 連接 ----------
@@ -327,6 +343,7 @@ class OptimizedPVEToNetBoxSync:
             self.nb_cache['platforms'][platform.name.lower()] = platform
         for role in self.nb_api.dcim.device_roles.all():
             self.nb_cache['roles'][role.name.lower()] = role
+            self.nb_cache['device_roles'][role.name.lower()] = role
         for cluster in self.nb_api.virtualization.clusters.all():
             self.nb_cache['clusters'][str(cluster.id)] = cluster
         for site in self.nb_api.dcim.sites.all():
@@ -335,8 +352,6 @@ class OptimizedPVEToNetBoxSync:
             self.nb_cache['manufacturers'][manufacturer.name.lower()] = manufacturer
         for device_type in self.nb_api.dcim.device_types.all():
             self.nb_cache['device_types'][device_type.model.lower()] = device_type
-        for device_role in self.nb_api.dcim.device_roles.all():
-            self.nb_cache['device_roles'][device_role.name.lower()] = device_role
         for cluster_type in self.nb_api.virtualization.cluster_types.all():
             self.nb_cache['cluster_types'][cluster_type.name.lower()] = cluster_type
         elapsed = time.time() - start_time
@@ -393,13 +408,13 @@ class OptimizedPVEToNetBoxSync:
                     vm['node'] = node_name
                     all_vms.append(vm)
                 self.pve_cache['vms_by_node'][node_name] = all_vms
-                for vm in all_vms[:10]:
+                for vm in all_vms:
                     try:
                         if vm['type'] == 'qemu':
                             vm['config'] = self.pve_api.nodes(node_name).qemu(vm['vmid']).config.get()
                         else:
                             vm['config'] = self.pve_api.nodes(node_name).lxc(vm['vmid']).config.get()
-                    except:
+                    except Exception:
                         pass
             except Exception as e:
                 print(f"  加載節點 {node_name} 的虛擬機失敗: {e}")
@@ -1174,13 +1189,13 @@ class OptimizedPVEToNetBoxSync:
         except Exception as e:
             print(f"  ⚠ 無法寫入漂移事件記錄: {e}")
 
-    def detect_new_vm(self, vm_id: int, vm_name: str, node_name: str):
+    def detect_new_vm(self, vm_id: int, vm_name: str, node_name: str, last_config=None):
         """若此 vmid 在先前同步中不存在（但叢集有先前記錄），視為新增 VM。"""
         if not self.enhanced_mode or not self.state_db:
             return
         if not self._known_vmids:
             return  # 首次同步，無先前記錄，不觸發
-        if self.state_db.get_last_vm_config(vm_id, self.cluster_name):
+        if last_config:
             return  # 已有記錄，不是新增
         print(f"🆕 VM {vm_name} 新增偵測 (ID: {vm_id}, 節點: {node_name})")
         self.stats['config_drifts_detected'] += 1
@@ -1319,15 +1334,29 @@ class OptimizedPVEToNetBoxSync:
                 print(f"  🧹 Log 清理：刪除 {d_del} 筆漂移事件、{t_del} 筆操作記錄（>{days} 天）")
         except Exception as exc:
             print(f"  ⚠️ Log 清理失敗: {exc}")
+        # Also clean up state_db vm_config_history (keep latest row per VM, remove old history)
+        if self.state_db:
+            try:
+                from pve_sync_plugin.models import PvePluginSettings
+                days = PvePluginSettings.load().log_retention_days
+                if days:
+                    h_del = self.state_db.cleanup_old_history(self.cluster_name, days)
+                    if h_del:
+                        print(f"  🧹 state_db 清理：刪除 {h_del} 筆舊配置歷史（>{days} 天）")
+            except Exception as exc:
+                print(f"  ⚠️ state_db 歷史清理失敗: {exc}")
 
     def sync_vm_tasks(self):
         """從 PVE 各節點抓取 VM 操作記錄（建立/刪除/Clone/遷移）並同步到 NetBox。"""
+        import calendar
+        import datetime as _dt
         try:
             from django.utils import timezone
             from pve_sync_plugin.models import PveVmTaskLog
         except ImportError:
             return
 
+        _utc = _dt.timezone.utc
         VM_TASK_TYPES = {
             "qmcreate", "qmdestroy", "qmclone", "qmmigrate", "qmrestore",
             "qmstart", "qmstop", "qmshutdown", "qmreboot",
@@ -1361,10 +1390,18 @@ class OptimizedPVEToNetBoxSync:
             cluster_name=self.cluster_name
         ).order_by("-start_time").values_list("start_time", flat=True).first()
         if latest:
-            import calendar
             since_ts = int(calendar.timegm(latest.utctimetuple())) + 1
         else:
             since_ts = int(time.time()) - 30 * 86400
+
+        # Pre-fetch existing UPIDs in the window → O(1) lookup instead of N+1 queries
+        since_dt = _dt.datetime.fromtimestamp(since_ts, tz=_utc)
+        existing_upids: set = set(
+            PveVmTaskLog.objects
+            .filter(cluster_name=self.cluster_name, start_time__gte=since_dt)
+            .values_list("upid", flat=True)
+        )
+        new_upids: set = set()  # UPIDs inserted this run (avoid duplicates within same run)
         new_count = 0
 
         for node_name in self.pve_cache.get("vms_by_node", {}):
@@ -1388,8 +1425,8 @@ class OptimizedPVEToNetBoxSync:
                 except (ValueError, TypeError):
                     continue
 
-                # UPID 去重
-                if PveVmTaskLog.objects.filter(upid=upid).exists():
+                # UPID 去重（使用預先撈取的集合，避免 N+1 查詢）
+                if upid in existing_upids or upid in new_upids:
                     continue
 
                 task_type = task.get("type")
@@ -1399,8 +1436,6 @@ class OptimizedPVEToNetBoxSync:
                 status    = task.get("status", "") or ""
                 vm_name   = vmid_to_name.get(vmid, f"VM-{vmid}")
 
-                import datetime as _dt
-                _utc = _dt.timezone.utc
                 start_dt = _dt.datetime.fromtimestamp(start_ts, tz=_utc) if start_ts else timezone.now()
                 end_dt   = _dt.datetime.fromtimestamp(end_ts,   tz=_utc) if end_ts   else None
 
@@ -1417,6 +1452,7 @@ class OptimizedPVEToNetBoxSync:
                     status=status,
                     notified_telegram=False,
                 )
+                new_upids.add(upid)
                 new_count += 1
 
                 # Telegram 通知（僅近期且已完成的操作）
@@ -1444,11 +1480,12 @@ class OptimizedPVEToNetBoxSync:
 
     def detect_config_drift(self, vm_id: int, vm_name: str, vm_config: Dict[str, Any],
                             current_tags: List[str], network_interfaces: List[Dict] = None,
-                            current_node: str = None) -> List[Dict]:
+                            current_node: str = None, last_config=None) -> List[Dict]:
         if not self.enhanced_mode or not self.state_db:
             return []
         drifts = []
-        last_config = self.state_db.get_last_vm_config(vm_id, self.cluster_name)
+        if last_config is None:
+            last_config = self.state_db.get_last_vm_config(vm_id, self.cluster_name)
         if not last_config:
             return drifts
         current_memory = int(vm_config.get('memory', 0))
@@ -1570,7 +1607,7 @@ class OptimizedPVEToNetBoxSync:
         return drifts
 
     def should_sync_vm(self, vm_id: int, vm_config: Dict[str, Any], tags: List[str],
-                       network_interfaces: List[Dict] = None) -> bool:
+                       network_interfaces: List[Dict] = None, last_config=None) -> bool:
         if not self.sync_config.get('incremental', True):
             return True
         if self.sync_config.get('force_full_sync', False):
@@ -1578,34 +1615,35 @@ class OptimizedPVEToNetBoxSync:
         current_hash = compute_config_hash(vm_config, tags, network_interfaces)
         if not self.state_db:
             return True
-        last_config = self.state_db.get_last_vm_config(vm_id, self.cluster_name)
+        if last_config is None:
+            last_config = self.state_db.get_last_vm_config(vm_id, self.cluster_name)
         if not last_config:
             return True
         if current_hash != last_config.get('config_hash'):
             return True
         return False
 
-    def detect_tag_changes(self, vm_id: int, vm_name: str, current_tags: List[str]) -> List[Dict]:
+    def detect_tag_changes(self, vm_id: int, vm_name: str, current_tags: List[str],
+                           last_config=None) -> List[Dict]:
         if not self.enhanced_mode or not self.state_db:
             return []
-        changes = []
-        last_config = self.state_db.get_last_vm_config(vm_id, self.cluster_name)
+        if last_config is None:
+            last_config = self.state_db.get_last_vm_config(vm_id, self.cluster_name)
         if not last_config:
-            return changes
+            return []
         old_tags = set(last_config.get('tags', []))
         new_tags = set(current_tags)
         added = new_tags - old_tags
         removed = old_tags - new_tags
+        changes = []
         for tag in added:
             changes.append({'type': 'added', 'tag': tag})
             self.stats['tag_changes'] += 1
             print(f"🏷️  VM {vm_name} 新增標籤: {tag}")
-            self._write_drift_event(vm_name, vm_id, 'tag_change', 'tags', '', tag, notified=False)
         for tag in removed:
             changes.append({'type': 'removed', 'tag': tag})
             self.stats['tag_changes'] += 1
             print(f"🏷️  VM {vm_name} 移除標籤: {tag}")
-            self._write_drift_event(vm_name, vm_id, 'tag_change', 'tags', tag, '', notified=False)
         if changes:
             added_list = [c['tag'] for c in changes if c['type'] == 'added']
             removed_list = [c['tag'] for c in changes if c['type'] == 'removed']
@@ -1621,7 +1659,12 @@ class OptimizedPVEToNetBoxSync:
                 f"📅 時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
                 f"{detail}\n請確認是否為預期變更。"
             )
-            self.send_telegram_notification(tag_msg)
+            notified = self.send_telegram_notification(tag_msg)
+            for c in changes:
+                if c['type'] == 'added':
+                    self._write_drift_event(vm_name, vm_id, 'tag_change', 'tags', '', c['tag'], notified=notified)
+                else:
+                    self._write_drift_event(vm_name, vm_id, 'tag_change', 'tags', c['tag'], '', notified=notified)
         return changes
 
     def detect_ip_change(self, vm_id: int, vm_name: str, current_ip: str):
@@ -1691,10 +1734,16 @@ class OptimizedPVEToNetBoxSync:
                             tag_ids.append(tag.id)
                         except Exception as e:
                             print(f"  建立標籤失敗 {tag_name}: {e}")
+        # Read last_config once; share with detect_new_vm / detect_tag_changes /
+        # detect_config_drift / should_sync_vm to avoid repeated SQLite round-trips.
+        last_config = (
+            self.state_db.get_last_vm_config(int(vm_id), self.cluster_name)
+            if (self.enhanced_mode and self.state_db) else None
+        )
         if self.enhanced_mode:
-            self.detect_new_vm(int(vm_id), original_vm_name, node_name)
+            self.detect_new_vm(int(vm_id), original_vm_name, node_name, last_config=last_config)
         if self.enhanced_mode and tag_names:
-            self.detect_tag_changes(int(vm_id), original_vm_name, tag_names)
+            self.detect_tag_changes(int(vm_id), original_vm_name, tag_names, last_config=last_config)
         vm_status = vm_data.get('status', '')
         if tag_names and vm_status in ('running', 'stopped'):
             first_tag = tag_names[0].lower()
@@ -1777,8 +1826,9 @@ class OptimizedPVEToNetBoxSync:
                 })
         if self.enhanced_mode:
             self.detect_config_drift(int(vm_id), original_vm_name, vm_config, tag_names,
-                                     network_interfaces, current_node=node_name)
-            if not force and not self.should_sync_vm(int(vm_id), vm_config, tag_names, network_interfaces):
+                                     network_interfaces, current_node=node_name, last_config=last_config)
+            if not force and not self.should_sync_vm(int(vm_id), vm_config, tag_names, network_interfaces,
+                                                     last_config=last_config):
                 cached_vm = self.nb_cache['virtual_machines_by_serial'].get(f"{vm_id}::{cluster['id']}")
                 if cached_vm is None:
                     # VM 在 NetBox 中不存在（例如隨節點被連帶刪除），
@@ -2017,6 +2067,18 @@ class OptimizedPVEToNetBoxSync:
         print("=" * 50)
         if self.enhanced_mode and self.state_db:
             self.sync_log_id = self.state_db.start_sync_log(self.cluster_name)
+        # Load notify_on_sync from PveClusterConfig (DB setting takes precedence over default True)
+        self.notify_on_sync = True
+        try:
+            from pve_sync_plugin.models import PveClusterConfig
+            cfg = PveClusterConfig.objects.filter(name=self.cluster_name).first()
+            if cfg is not None:
+                self.notify_on_sync = cfg.notify_on_sync
+        except Exception:
+            pass
+        # Reset per-sync Telegram counters
+        self._telegram_sent = 0
+        self._telegram_suppressed = 0
         sync_mode = "增量" if self.sync_config.get('incremental', True) else "全量"
         start_message = f"""
 🔄 <b>PVE-NetBox 同步開始</b>
