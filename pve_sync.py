@@ -1660,7 +1660,9 @@ class OptimizedPVEToNetBoxSync:
                 else:
                     vm_config = self.pve_api.nodes(node_name).lxc(vm_data['vmid']).config.get()
         except Exception as e:
-            print(f"  獲取 VM 配置失敗: {e}")
+            error_msg = str(e)
+            print(f"  獲取 VM 配置失敗: {error_msg}")
+            self.log_vm_sync_error(original_vm_name, int(vm_id), f"無法取得 PVE 配置: {error_msg}")
             return False
         is_template = vm_data.get('is_template', False) or vm_config.get('template', 0) == 1
         boot_choice = 'on' if vm_config.get('onboot', 0) == 1 else 'off'
