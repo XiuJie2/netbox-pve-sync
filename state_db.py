@@ -154,7 +154,7 @@ class StateDB:
             with sqlite3.connect(self.db_path) as conn:
                 conn.execute(
                     """
-                    INSERT INTO vm_config_history
+                    INSERT OR REPLACE INTO vm_config_history
                     (vm_id, cluster_name, config_hash, memory, vcpus, tags_json,
                      node, primary_ip, vm_name, description, disk_summary)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -255,6 +255,28 @@ class StateDB:
                         'sync_time': row[4]
                     })
                 return changes
+
+    def cleanup_old_history(self, cluster_name: str, days: int) -> int:
+        """Delete vm_config_history rows older than `days`, keeping the latest row per VM."""
+        import datetime as _dt
+        cutoff = (_dt.datetime.utcnow() - _dt.timedelta(days=days)).strftime('%Y-%m-%d %H:%M:%S')
+        with self._lock:
+            with sqlite3.connect(self.db_path) as conn:
+                result = conn.execute(
+                    """
+                    DELETE FROM vm_config_history
+                    WHERE cluster_name = ?
+                      AND sync_time < ?
+                      AND sync_time NOT IN (
+                          SELECT MAX(sync_time) FROM vm_config_history
+                          WHERE cluster_name = ?
+                          GROUP BY vm_id
+                      )
+                    """,
+                    (cluster_name, cutoff, cluster_name),
+                )
+                conn.commit()
+                return result.rowcount
 
     # ========== 节点状态历史 ==========
 
@@ -507,7 +529,7 @@ def compute_config_hash(vm_config: Dict[str, Any], tags: List[str], network_inte
         'ostype': vm_config.get('ostype', ''),
         'cores': vm_config.get('cores', 1),
         'sockets': vm_config.get('sockets', 1),
-        'description': vm_config.get('description', '')[:200],  # 限制长度
+        'description': (vm_config.get('description') or '').replace('\r\n', '\n').replace('\r', '\n').strip()[:200].strip(),
         'tags': sorted(tags),  # 排序以确保一致性
         'networks': net_config  # 添加网络接口配置
     }
