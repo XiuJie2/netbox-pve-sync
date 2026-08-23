@@ -177,8 +177,7 @@ class OptimizedPVEToNetBoxSync:
 🔌 MAC 位址: {mac_address}
 ❌ 錯誤: {error_message}
 
-⚠️ 該網卡的 MAC 位址與另一台已同步的 VM 重複（通常是複製 VM 時未重新產生 MAC），
-   IP 位址仍會照常同步，但 MAC 關聯需要手動處理
+⚠️ 該網卡的 MAC 位址與另一台已同步的 VM 重複（通常是複製 VM 時未重新產生 MAC）
 """
         self.send_telegram_notification(message)
         print(f"📧 已發送 MAC 衝突通知: {vm_name} - {mac_address}")
