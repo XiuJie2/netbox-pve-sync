@@ -8,6 +8,7 @@ __pycache__/
 venv/
 .venv/
 env/
+.pypi-venv/
 
 # Sensitive config / environment files
 env.sh
