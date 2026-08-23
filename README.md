@@ -1,12 +1,55 @@
 # proxsync
 
-[![Version](https://img.shields.io/badge/version-2.1.0-blue.svg)](https://github.com/XiuJie2/proxsync)
+[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/XiuJie2/proxsync)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![NetBox 4.5–4.6](https://img.shields.io/badge/NetBox-4.5%20–%204.6-green.svg)](https://netbox.dev/)
 [![Proxmox VE](https://img.shields.io/badge/Proxmox-VE%20%2B%20PBS-orange.svg)](https://www.proxmox.com/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 將 **Proxmox Virtual Environment (PVE)** 與 **Proxmox Backup Server (PBS)** 的資產資料自動同步到 **NetBox** 的原生插件。支援多叢集、多 PBS 伺服器、排程同步、Webhook 事件驅動，以及 Telegram 通知。
+
+---
+
+## 目錄
+
+- [專案截圖](#專案截圖)
+- [功能特色](#功能特色)
+- [系統需求](#系統需求)
+- [安裝](#安裝)
+- [設定](#設定)
+- [使用方式](#使用方式)
+- [資料對應](#資料對應)
+- [專案結構](#專案結構)
+- [設定優先級](#設定優先級)
+- [常見問題](#常見問題)
+- [開發](#開發)
+- [授權](#授權)
+- [致謝](#致謝)
+
+---
+
+## 專案截圖
+
+<!--
+  將截圖放進 docs/screenshots/ 目錄，檔名對應下方即可自動顯示。
+  建議尺寸：1600x900 或以上，PNG 格式。
+-->
+
+### Dashboard
+
+![Dashboard](docs/screenshots/dashboard.png)
+
+### PVE Cluster 詳情
+
+![PVE Cluster](docs/screenshots/pve-cluster.png)
+
+### Sync Jobs 同步歷史
+
+![Sync Jobs](docs/screenshots/sync-jobs.png)
+
+### Telegram 通知
+
+![Telegram Notification](docs/screenshots/telegram-notification.png)
 
 ---
 
