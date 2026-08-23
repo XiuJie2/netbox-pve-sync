@@ -1769,13 +1769,29 @@ class OptimizedPVEToNetBoxSync:
                                 print(f"  ✓ VM {original_vm_name} 電源狀態更新: {current_status} → {status}")
                         except Exception as e:
                             print(f"  ✗ 更新 VM {original_vm_name} 關聯失敗: {e}")
+                    # MAC/IP 衝突檢查不受增量同步影響：即使 PVE 配置沒變，仍要每次
+                    # 重新檢查介面的 MAC/IP 位址，衝突就再次通知，而不是只在第一次配置
+                    # 變更時才發現。process_vm_interfaces 本身是冪等的（已存在的 MAC/IP
+                    # 不會重複建立），所以在跳過分支呼叫它不會產生多餘的 NetBox 寫入。
+                    _, skip_primary_ip, _ = self.process_vm_interfaces(
+                        cached_vm, vm_config, agent_interfaces, mac_to_interface, device
+                    )
+                    if skip_primary_ip:
+                        try:
+                            current_primary_ip4_id = getattr(getattr(cached_vm, 'primary_ip4', None), 'id', None)
+                            if current_primary_ip4_id != skip_primary_ip.id:
+                                cached_vm.primary_ip4 = skip_primary_ip.id
+                                cached_vm.save()
+                        except Exception as e:
+                            print(f"  設定 VM 主 IP 失敗: {e}")
                     print(f"  ℹ️  VM {original_vm_name} 無配置變更，跳過同步")
                     if self.state_db:
                         try:
                             config_hash = compute_config_hash(vm_config, tag_names, network_interfaces)
                             memory = int(vm_config.get('memory', 0))
                             vcpus_save = int(vm_config.get('vcpus', vcpus))
-                            cur_ip = getattr(getattr(cached_vm, 'primary_ip4', None), 'address', None) or ''
+                            cur_ip = getattr(skip_primary_ip, 'address', None) \
+                                or getattr(getattr(cached_vm, 'primary_ip4', None), 'address', None) or ''
                             self.state_db.save_vm_config_snapshot(
                                 vm_id=int(vm_id), cluster_name=self.cluster_name, config_hash=config_hash,
                                 memory=memory, vcpus=vcpus_save, tags=tag_names,
