@@ -182,6 +182,27 @@ class OptimizedPVEToNetBoxSync:
         self.send_telegram_notification(message)
         print(f"📧 已發送 MAC 衝突通知: {vm_name} - {mac_address}")
 
+    def log_vm_sync_error(self, vm_name: str, vm_id: int, error_message: str):
+        error_info = {
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+            'vm_name': vm_name,
+            'ip_address': f"vmid {vm_id}",
+            'error': error_message
+        }
+        self.error_log.append(error_info)
+        message = f"""
+🚨 <b>PVE-NetBox 同步 VM 失敗警告</b>
+
+📅 時間: {error_info['timestamp']}
+🖥️ 虛擬機: {vm_name} (vmid {vm_id})
+🔀 叢集: {self.cluster_name}
+❌ 錯誤: {error_message}
+
+⚠️ 此 VM 本次同步未完成，下次同步會自動重試
+"""
+        self.send_telegram_notification(message)
+        print(f"📧 已發送 VM 同步失敗通知: {vm_name} - {error_message}")
+
     def send_enhanced_summary(self):
         if not hasattr(self, 'stats'):
             return
@@ -656,7 +677,8 @@ class OptimizedPVEToNetBoxSync:
             return None
 
     # ---------- IP 分配（改進版） ----------
-    def assign_ip_to_interface(self, interface, ip_address: str, dns_name: str = None, is_vm_interface: bool = False) -> Optional[Any]:
+    def assign_ip_to_interface(self, interface, ip_address: str, dns_name: str = None,
+                                is_vm_interface: bool = False, owner_name: str = None) -> Optional[Any]:
         try:
             if '/' not in ip_address:
                 ip_with_prefix = f"{ip_address}/24"
@@ -704,16 +726,24 @@ class OptimizedPVEToNetBoxSync:
         except Exception as e:
             error_msg = str(e)
             print(f"      分配 IP 位址失敗 {ip_address}: {error_msg}")
-            if "Cannot reassign IP address while it is designated as the primary IP" in error_msg:
-                vm_name = "Unknown"
+            # Any IP assignment failure needs a human to look at it, not just the
+            # one specific "reassign primary IP" error — otherwise conflicts with a
+            # different underlying cause (VRF/prefix validation, overlapping range,
+            # etc.) fail silently with nothing but a stdout line.
+            owner = owner_name or "Unknown"
+            if owner == "Unknown":
                 try:
                     if is_vm_interface:
                         vm_info = self.nb_api.virtualization.interfaces.get(interface.id)
                         if vm_info and vm_info.virtual_machine:
-                            vm_name = vm_info.virtual_machine.name
-                except:
+                            owner = vm_info.virtual_machine.name
+                    else:
+                        dev_info = self.nb_api.dcim.interfaces.get(interface.id)
+                        if dev_info and dev_info.device:
+                            owner = dev_info.device.name
+                except Exception:
                     pass
-                self.log_ip_conflict_error(vm_name, ip_address, error_msg)
+            self.log_ip_conflict_error(owner, ip_address, error_msg)
             return None
 
     # ---------- 節點網路介面同步 ----------
@@ -769,7 +799,8 @@ class OptimizedPVEToNetBoxSync:
                     continue
             cidr = iface_data.get('cidr')
             if cidr:
-                self.assign_ip_to_interface(nb_iface, cidr, dns_name=f"{node_name}.local", is_vm_interface=False)
+                self.assign_ip_to_interface(nb_iface, cidr, dns_name=f"{node_name}.local",
+                                            is_vm_interface=False, owner_name=device.name)
 
     # ---------- 節點同步 ----------
     def sync_pve_nodes_to_netbox(self) -> Tuple[bool, Dict[str, Any], Dict]:
@@ -1045,7 +1076,8 @@ class OptimizedPVEToNetBoxSync:
                             prefix_len = ip_info['prefix']
                             full_addr = f"{ip_addr}/{prefix_len}"
                             ip_obj = self.assign_ip_to_interface(
-                                vm_interface, full_addr, f"{vm.name}.local", is_vm_interface=True
+                                vm_interface, full_addr, f"{vm.name}.local",
+                                is_vm_interface=True, owner_name=vm.name
                             )
                             if ip_obj and not primary_ip:
                                 primary_ip = ip_obj
@@ -1916,6 +1948,7 @@ class OptimizedPVEToNetBoxSync:
         except Exception as e:
             error_msg = str(e)
             print(f"  處理虛擬機失敗: {error_msg}")
+            self.log_vm_sync_error(original_vm_name, int(vm_id), error_msg)
             # 即使 NetBox 同步失敗，仍需更新 snapshot 的非 hash 欄位（vm_name, node,
             # disk_summary, description, tags, memory, vcpus），並保留舊 config_hash，
             # 使下一輪不重複發送漂移通知，同時 should_sync_vm() 仍會返回 True 繼續重試。
