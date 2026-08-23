@@ -161,6 +161,28 @@ class OptimizedPVEToNetBoxSync:
         self.send_telegram_notification(message)
         print(f"📧 已發送 IP 衝突通知: {vm_name} - {ip_address}")
 
+    def log_mac_conflict_error(self, vm_name: str, mac_address: str, error_message: str):
+        error_info = {
+            'timestamp': time.strftime("%Y-%m-%d %H:%M:%S"),
+            'vm_name': vm_name,
+            'ip_address': mac_address,
+            'error': error_message
+        }
+        self.error_log.append(error_info)
+        message = f"""
+🚨 <b>PVE-NetBox 同步 MAC 位址衝突警告</b>
+
+📅 時間: {error_info['timestamp']}
+🖥️ 虛擬機: {vm_name}
+🔌 MAC 位址: {mac_address}
+❌ 錯誤: {error_message}
+
+⚠️ 該網卡的 MAC 位址與另一台已同步的 VM 重複（通常是複製 VM 時未重新產生 MAC），
+   IP 位址仍會照常同步，但 MAC 關聯需要手動處理
+"""
+        self.send_telegram_notification(message)
+        print(f"📧 已發送 MAC 衝突通知: {vm_name} - {mac_address}")
+
     def send_enhanced_summary(self):
         if not hasattr(self, 'stats'):
             return
@@ -924,33 +946,43 @@ class OptimizedPVEToNetBoxSync:
         return {}, {}
 
     # ---------- MAC 位址設定（NetBox 4.6+ 使用獨立 MACAddress 物件） ----------
-    def set_vm_interface_mac(self, vm_interface, mac_address: str):
-        """Create/update a dcim.MACAddress for the VMInterface and set it as primary."""
-        mac_lower = mac_address.lower()
-        existing_mac = self.nb_cache['mac_addresses'].get(mac_lower)
-        if existing_mac:
-            # Already exists — ensure it's assigned to this interface and set as primary
-            needs_save = False
-            if getattr(existing_mac, 'assigned_object_id', None) != vm_interface.id:
-                existing_mac.assigned_object_type = 'virtualization.vminterface'
-                existing_mac.assigned_object_id = vm_interface.id
-                existing_mac.save()
-            # Set primary_mac_address on the interface if not already set
-            current_primary = getattr(vm_interface, 'primary_mac_address', None)
-            if not current_primary or (hasattr(current_primary, 'id') and current_primary.id != existing_mac.id):
-                vm_interface.primary_mac_address = existing_mac.id
+    def set_vm_interface_mac(self, vm_interface, mac_address: str, vm_name: str = None):
+        """Create/update a dcim.MACAddress for the VMInterface and set it as primary.
+
+        Two different PVE VMs can legitimately report the same hardware-address
+        (e.g. a clone whose NIC MAC was never regenerated). NetBox refuses to
+        move a MACAddress that is another object's primary MAC, so failures here
+        are caught and reported instead of raised — a MAC conflict must never
+        block syncing the interface's IP address.
+        """
+        try:
+            mac_lower = mac_address.lower()
+            existing_mac = self.nb_cache['mac_addresses'].get(mac_lower)
+            if existing_mac:
+                # Already exists — ensure it's assigned to this interface and set as primary
+                if getattr(existing_mac, 'assigned_object_id', None) != vm_interface.id:
+                    existing_mac.assigned_object_type = 'virtualization.vminterface'
+                    existing_mac.assigned_object_id = vm_interface.id
+                    existing_mac.save()
+                # Set primary_mac_address on the interface if not already set
+                current_primary = getattr(vm_interface, 'primary_mac_address', None)
+                if not current_primary or (hasattr(current_primary, 'id') and current_primary.id != existing_mac.id):
+                    vm_interface.primary_mac_address = existing_mac.id
+                    vm_interface.save()
+            else:
+                # Create new MACAddress assigned to this VMInterface
+                mac_obj = self.nb_api.dcim.mac_addresses.create(
+                    mac_address=mac_address,
+                    assigned_object_type='virtualization.vminterface',
+                    assigned_object_id=vm_interface.id,
+                )
+                self.nb_cache['mac_addresses'][mac_lower] = mac_obj
+                # Set it as primary
+                vm_interface.primary_mac_address = mac_obj.id
                 vm_interface.save()
-        else:
-            # Create new MACAddress assigned to this VMInterface
-            mac_obj = self.nb_api.dcim.mac_addresses.create(
-                mac_address=mac_address,
-                assigned_object_type='virtualization.vminterface',
-                assigned_object_id=vm_interface.id,
-            )
-            self.nb_cache['mac_addresses'][mac_lower] = mac_obj
-            # Set it as primary
-            vm_interface.primary_mac_address = mac_obj.id
-            vm_interface.save()
+        except Exception as e:
+            print(f"      設定 MAC 位址失敗 {mac_address}: {e}")
+            self.log_mac_conflict_error(vm_name or "Unknown", mac_address, str(e))
 
     # ---------- VM 介面處理 ----------
     def process_vm_interfaces(self, vm, vm_config: Dict, agent_interfaces: Dict, mac_to_interface: Dict,
@@ -986,7 +1018,7 @@ class OptimizedPVEToNetBoxSync:
                     if enabled_changed:
                         vm_interface.enabled = enabled
                     if mac_address:
-                        self.set_vm_interface_mac(vm_interface, mac_address)
+                        self.set_vm_interface_mac(vm_interface, mac_address, vm_name=vm.name)
                         # set_vm_interface_mac only saves the interface in some branches;
                         # ensure the enabled change is always persisted
                         if enabled_changed:
@@ -1000,7 +1032,7 @@ class OptimizedPVEToNetBoxSync:
                     vm_interface = self.nb_api.virtualization.interfaces.create(**iface_create_data)
                     self.nb_cache['vm_interfaces'].setdefault(vm.id, {})[config_key] = vm_interface
                     if mac_address:
-                        self.set_vm_interface_mac(vm_interface, mac_address)
+                        self.set_vm_interface_mac(vm_interface, mac_address, vm_name=vm.name)
                 iface_data = {
                     'name': config_key, 'mac_address': mac_address or '', 'bridge': bridge_name
                 }
