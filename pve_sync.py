@@ -44,6 +44,8 @@ class OptimizedPVEToNetBoxSync:
             'config_drifts_detected': 0,
             'tag_changes': 0,
             'resources_alert': 0,
+            'node_mismatch_alerts': 0,
+            'no_ip_alerts': 0,
             'total_vms': 0,
             'success_vms': 0,
             'elapsed_time': 0
@@ -246,6 +248,10 @@ class OptimizedPVEToNetBoxSync:
             extras.append(f"🏷️ 標籤變更: {self.stats['tag_changes']}")
         if self.stats.get('resources_alert', 0) > 0:
             extras.append(f"⚠️ 資源告警: {self.stats['resources_alert']}")
+        if self.stats.get('node_mismatch_alerts', 0) > 0:
+            extras.append(f"📍 節點放置異常: {self.stats['node_mismatch_alerts']}")
+        if self.stats.get('no_ip_alerts', 0) > 0:
+            extras.append(f"🌐 運行中但無 IP: {self.stats['no_ip_alerts']}")
         if extras:
             message += "\n🔍 檢測發現:\n" + "\n".join(extras)
         if self.error_log:
@@ -1167,6 +1173,20 @@ class OptimizedPVEToNetBoxSync:
         """Normalize description: unify line endings, strip whitespace."""
         return (s or '').replace('\r\n', '\n').replace('\r', '\n').strip()
 
+    @staticmethod
+    def _parse_expected_node(description: str) -> Optional[str]:
+        """從 VM 描述 (Notes) 解析使用者標記的預期節點。
+
+        支援格式如 "node: 181" 或 "node：181"（半形/全形冒號皆可，
+        且不區分大小寫，Node/NODE/node 皆可），必須獨佔一行。
+        找不到則回傳 None。
+        """
+        import re
+        if not description:
+            return None
+        m = re.search(r'(?im)^\s*node\s*[:：]\s*(\S+)\s*$', description)
+        return m.group(1).strip() if m else None
+
     def _write_drift_event(self, vm_name: str, vmid: int, drift_type: str,
                            field_name: str, old_value: str, new_value: str,
                            notified: bool = False):
@@ -1691,6 +1711,36 @@ class OptimizedPVEToNetBoxSync:
         self.send_telegram_notification(ip_msg)
         self._write_drift_event(vm_name, vm_id, 'ip_change', 'primary_ip', old_ip, current_ip, notified=True)
 
+    def check_agent_ip_missing(self, vm_id: str, vm_name: str, vm_type: str, is_template: bool,
+                               vm_status: str, qemu_agent_enabled: bool, ip_str: str):
+        """VM 已在執行中，卻完全取不到 IP —— 多半是 QEMU Guest Agent 未啟用/未安裝。
+
+        每次同步皆檢查（非一次性事件），只要問題未解決就會持續提醒。
+        """
+        if vm_type != 'qemu' or is_template or vm_status != 'running' or ip_str:
+            return
+        print(f"🌐 VM {vm_name} 運行中但無法取得 IP")
+        self.stats['no_ip_alerts'] = self.stats.get('no_ip_alerts', 0) + 1
+        if qemu_agent_enabled:
+            detail = (
+                "⚠️ QEMU Guest Agent 已在設定中啟用，但仍無法取得 IP，"
+                "請確認 VM 內部的 qemu-guest-agent 服務是否已安裝並執行中。"
+            )
+        else:
+            detail = (
+                "⚠️ 此 VM 尚未啟用 QEMU Guest Agent（Options → QEMU Guest Agent），"
+                "請啟用後於 VM 內安裝對應套件（qemu-guest-agent）。"
+            )
+        msg = (
+            f"🌐 <b>VM 運行中但無法取得 IP</b>\n\n"
+            f"🖥️ 名稱: <b>{vm_name}</b> (ID: {vm_id})\n"
+            f"🔀 叢集: {self.cluster_name}\n"
+            f"📅 時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+            f"{detail}"
+        )
+        self.send_telegram_notification(msg)
+        self._write_drift_event(vm_name, int(vm_id), 'agent_ip_missing', 'primary_ip', '', '', notified=True)
+
     # ---------- 虛擬機處理主邏輯 ----------
     def process_virtual_machine(self, vm_data: Dict, device, cluster: Dict, force: bool = False) -> bool:
         vm_id = str(vm_data['vmid'])
@@ -1772,6 +1822,26 @@ class OptimizedPVEToNetBoxSync:
 ⚠️ 虛擬機應處於關機狀態，請確認開機原因。
 """
                 self.send_telegram_notification(message)
+
+        # 節點放置檢查：VM 描述 (Notes) 內若標記 "node: <預期節點>"，
+        # 而目前實際所在節點與其不符，則提醒（每次同步皆檢查，非一次性事件）。
+        expected_node = self._parse_expected_node(vm_config.get('description', ''))
+        if expected_node and expected_node != node_name:
+            print(f"📍 VM {original_vm_name} 節點不符期望: 目前={node_name}, 期望={expected_node}")
+            self.stats['node_mismatch_alerts'] += 1
+            node_mismatch_msg = (
+                f"📍 <b>VM 節點與 Notes 標記不符</b>\n\n"
+                f"🖥️ 名稱: <b>{original_vm_name}</b> (ID: {vm_id})\n"
+                f"🔀 叢集: {self.cluster_name}\n"
+                f"📅 時間: {time.strftime('%Y-%m-%d %H:%M:%S')}\n\n"
+                f"📌 目前節點: <code>{node_name}</code>\n"
+                f"📋 Notes 標記節點: <code>{expected_node}</code>\n\n"
+                f"⚠️ 請確認此 VM 是否應遷回指定節點。"
+            )
+            self.send_telegram_notification(node_mismatch_msg)
+            self._write_drift_event(original_vm_name, int(vm_id), 'node_mismatch', 'node',
+                                    node_name, expected_node, notified=True)
+
         role_id = None
         vm_pool = self.get_vm_pool(vm_data['vmid'], vm_type)
         if vm_pool:
@@ -1874,13 +1944,15 @@ class OptimizedPVEToNetBoxSync:
                         except Exception as e:
                             print(f"  設定 VM 主 IP 失敗: {e}")
                     print(f"  ℹ️  VM {original_vm_name} 無配置變更，跳過同步")
+                    cur_ip = getattr(skip_primary_ip, 'address', None) \
+                        or getattr(getattr(cached_vm, 'primary_ip4', None), 'address', None) or ''
+                    self.check_agent_ip_missing(vm_id, original_vm_name, vm_type, is_template,
+                                                vm_status, qemu_agent_enabled, cur_ip)
                     if self.state_db:
                         try:
                             config_hash = compute_config_hash(vm_config, tag_names, network_interfaces)
                             memory = int(vm_config.get('memory', 0))
                             vcpus_save = int(vm_config.get('vcpus', vcpus))
-                            cur_ip = getattr(skip_primary_ip, 'address', None) \
-                                or getattr(getattr(cached_vm, 'primary_ip4', None), 'address', None) or ''
                             self.state_db.save_vm_config_snapshot(
                                 vm_id=int(vm_id), cluster_name=self.cluster_name, config_hash=config_hash,
                                 memory=memory, vcpus=vcpus_save, tags=tag_names,
@@ -1989,6 +2061,8 @@ class OptimizedPVEToNetBoxSync:
                     print(f"  設定 VM 主 IP 失敗: {e}")
             if self.enhanced_mode and primary_ip_str:
                 self.detect_ip_change(int(vm_id), original_vm_name, primary_ip_str)
+            self.check_agent_ip_missing(vm_id, original_vm_name, vm_type, is_template,
+                                        vm_status, qemu_agent_enabled, primary_ip_str)
             print(f"  標籤: {len(tag_ids)}個, 介面: {interface_count}個, 磁碟: {disk_count}個, 大小: {disk_size}MB")
             if self.enhanced_mode and self.state_db:
                 config_hash = compute_config_hash(vm_config, tag_names, network_interfaces)

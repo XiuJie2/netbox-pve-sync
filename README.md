@@ -61,6 +61,8 @@
 - VM / CT → NetBox **Virtual Machine**（狀態、規格、磁碟、標籤）
 - QEMU Guest Agent 整合，從執行中 VM 取得實際 IP 位址
 - 配置漂移偵測：自動發現 VM 的 CPU / 記憶體設定變更
+- 節點放置檢查：VM 描述 (Notes) 內若標記 `node: <預期節點>`，當實際所在節點與標記不符時透過 Telegram 提醒
+- Guest Agent 異常提醒：VM 執行中卻取不到 IP（QEMU Guest Agent 未啟用或未安裝）時透過 Telegram 提醒
 - 增量同步：透過 SQLite state_db 追蹤變更，避免全量更新
 
 ### 多叢集支援
