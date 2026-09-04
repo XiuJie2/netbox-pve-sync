@@ -128,16 +128,20 @@ class OptimizedPVEToNetBoxSync:
 
     # ---------- Telegram ----------
     # Max Telegram messages per sync run; excess are counted and reported in the summary.
-    _MAX_TELEGRAM_PER_SYNC = 20
+    _MAX_TELEGRAM_PER_SYNC = 50
 
-    def send_telegram_notification(self, message: str) -> bool:
+    def send_telegram_notification(self, message: str, force: bool = False) -> bool:
         if not getattr(self, 'notify_on_sync', True):
             return False
         if not self.telegram_bot_token or not self.telegram_chat_id:
             return False
         # Throttle: cap messages per sync run to avoid flooding on bulk changes.
+        # force=True bypasses the cap — used for the end-of-sync summary so a
+        # busy run (lots of per-VM alerts already hit the cap) still always
+        # ends with a report, instead of the summary itself being silently
+        # suppressed along with everything else.
         sent = getattr(self, '_telegram_sent', 0)
-        if sent >= self._MAX_TELEGRAM_PER_SYNC:
+        if not force and sent >= self._MAX_TELEGRAM_PER_SYNC:
             self._telegram_suppressed = getattr(self, '_telegram_suppressed', 0) + 1
             return False
         try:
@@ -263,7 +267,9 @@ class OptimizedPVEToNetBoxSync:
         suppressed = getattr(self, '_telegram_suppressed', 0)
         if suppressed:
             message += f"\n📵 本輪通知已達上限，{suppressed} 則訊息被壓制（詳見 NetBox 漂移事件記錄）"
-        self.send_telegram_notification(message)
+        # 最終報告一律強制發送，不受單次同步的通知上限影響 —— 否則變更量大時，
+        # 逐台 VM 的告警把額度用完，反而讓使用者連本輪總結都收不到。
+        self.send_telegram_notification(message, force=True)
 
     # ---------- API 連接 ----------
     def connect_pve(self) -> bool:

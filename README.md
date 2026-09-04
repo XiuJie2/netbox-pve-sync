@@ -1,6 +1,6 @@
 # proxsync
 
-[![Version](https://img.shields.io/badge/version-2.1.1-blue.svg)](https://github.com/XiuJie2/proxsync)
+[![Version](https://img.shields.io/badge/version-2.1.2-blue.svg)](https://github.com/XiuJie2/proxsync)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/)
 [![NetBox 4.5–4.6](https://img.shields.io/badge/NetBox-4.5%20–%204.6-green.svg)](https://netbox.dev/)
 [![Proxmox VE](https://img.shields.io/badge/Proxmox-VE%20%2B%20PBS-orange.svg)](https://www.proxmox.com/)
