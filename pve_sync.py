@@ -1197,14 +1197,15 @@ class OptimizedPVEToNetBoxSync:
     def _parse_expected_node(description: str) -> Optional[str]:
         """從 VM 描述 (Notes) 解析使用者標記的預期節點。
 
-        支援格式如 "node: 181" 或 "node：181"（半形/全形冒號皆可，
-        且不區分大小寫，Node/NODE/node 皆可），必須獨佔一行。
-        找不到則回傳 None。
+        支援格式如 "node: 181"、"node：181"（半形/全形冒號皆可，
+        且不區分大小寫，Node/NODE/node 皆可）、或中文標記
+        "預設放在PVE205" / "預設放在: PVE205"（冒號可省略），
+        必須獨佔一行。找不到則回傳 None。
         """
         import re
         if not description:
             return None
-        m = re.search(r'(?im)^\s*node\s*[:：]\s*(\S+)\s*$', description)
+        m = re.search(r'(?im)^\s*(?:node\s*[:：]\s*|預設放在\s*[:：]?\s*)(\S+)\s*$', description)
         return m.group(1).strip() if m else None
 
     def _write_drift_event(self, vm_name: str, vmid: int, drift_type: str,
@@ -1843,10 +1844,11 @@ class OptimizedPVEToNetBoxSync:
 """
                 self.send_telegram_notification(message)
 
-        # 節點放置檢查：VM 描述 (Notes) 內若標記 "node: <預期節點>"，
-        # 而目前實際所在節點與其不符，則提醒（每次同步皆檢查，非一次性事件）。
+        # 節點放置檢查：VM 描述 (Notes) 內若標記 "node: <預期節點>" 或
+        # "預設放在<預期節點>"，而目前實際所在節點與其不符，則提醒
+        # （每次同步皆檢查，非一次性事件）。
         expected_node = self._parse_expected_node(vm_config.get('description', ''))
-        if expected_node and expected_node != node_name:
+        if expected_node and expected_node.lower() != node_name.lower():
             print(f"📍 VM {original_vm_name} 節點不符期望: 目前={node_name}, 期望={expected_node}")
             self.stats['node_mismatch_alerts'] += 1
             node_mismatch_msg = (
