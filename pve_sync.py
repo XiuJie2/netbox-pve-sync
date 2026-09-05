@@ -9,6 +9,7 @@ import sys
 import time
 import json
 import hashlib
+import ipaddress
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Tuple, Set
 import urllib3
@@ -1046,6 +1047,7 @@ class OptimizedPVEToNetBoxSync:
                               device) -> Tuple[int, Optional[Any], List[Dict]]:
         interface_count = 0
         primary_ip = None
+        primary_ip_value = None
         interfaces_data = []
         for config_key, config_value in vm_config.items():
             if not config_key.startswith('net'):
@@ -1106,8 +1108,20 @@ class OptimizedPVEToNetBoxSync:
                                 vm_interface, full_addr, f"{vm.name}.local",
                                 is_vm_interface=True, owner_name=vm.name
                             )
-                            if ip_obj and not primary_ip:
-                                primary_ip = ip_obj
+                            if ip_obj:
+                                # 一台 VM 可能同時有多個 IPv4（如 172.17.*.* 與 172.20.*.*），
+                                # 若每次同步時憑介面/回應順序挑第一個當 Primary IPv4，順序不保證
+                                # 穩定就會造成 Primary IPv4 在同步之間漂移、觸發假的 IP 變更通知。
+                                # 固定規則：永遠選數值最小的 IPv4 當 Primary，確保結果穩定可重現。
+                                try:
+                                    ip_value = int(ipaddress.IPv4Address(ip_addr))
+                                except ValueError:
+                                    ip_value = None
+                                if primary_ip is None or (
+                                    ip_value is not None and (primary_ip_value is None or ip_value < primary_ip_value)
+                                ):
+                                    primary_ip = ip_obj
+                                    primary_ip_value = ip_value
             except Exception as e:
                 print(f"    處理介面失敗 {config_key}: {e}")
         return interface_count, primary_ip, interfaces_data
